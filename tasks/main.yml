@@ -1,0 +1,61 @@
+---
+
+- local_action: shell cd ../../ && git ls-files -s ./services/{{service_dir | default(service_name)}} | git hash-object --stdin
+  register: service_hash
+
+- name: set fact service_hash
+  set_fact:
+          sha_service: "{{service_hash.stdout_lines[0]}}"
+
+- name: read env_variables of {{service_name}} from docker-compose
+  copy:
+          content: "{{ (lookup('file', '../../stacks/{{stack_name}}/docker-compose.yml', errors='ignore') | from_yaml)['services'][service_name]['environment']}}"
+          dest: "/tmp/{{stack_name}}_{{service_name}}_service_env_vars.yml"
+
+- name: copy production .env file
+  copy:
+          src: "../../stacks/{{stack_name}}/deploy-env/{{ENV_NAME}}"
+          dest: "/tmp/{{stack_name}}_{{service_name}}_.env"
+
+
+- local_action: stat path=../../stacks/{{stack_name}}/deploy-env/common
+  register: common_env_file
+
+- name: copy common .env file
+  copy:
+          src: "../../stacks/{{stack_name}}/deploy-env/common"
+          dest: "/tmp/{{stack_name}}_{{service_name}}_common_.env"
+  when: common_env_file.stat.exists
+
+- name: replace hosts vars
+  replace:
+          path: /tmp/{{stack_name}}_{{service_name}}_.env
+          regexp: "{{item.key}}"
+          replace: "{{item.value}}"
+          backup: yes
+  with_dict: "{{variables | default('{}')}}"
+
+- name: merge vars and read to dict
+  shell: |
+          if [ -e /tmp/{{stack_name}}_{{service_name}}_common_.env ]; then 
+                  export $(grep -v '^#' /tmp/{{stack_name}}_{{service_name}}_common_.env | xargs);
+          fi
+          export $(grep -v '^#' /tmp/{{stack_name}}_{{service_name}}_.env | xargs)
+          envsubst < /tmp/{{stack_name}}_{{service_name}}_service_env_vars.yml
+  register: "interpolated_vars_"
+
+- name: env frbug
+  debug: msg="{{ interpolated_vars_ }}"
+
+- name: run docker image
+  docker_container:
+          name: "{{ stack_name }}{{ service_name }}"
+          image: "{{ image_name }}"
+          env: "{{interpolated_vars_.stdout}}"
+          command: "{{ command | default(omit) }}"
+          expose: "{{ expose | default(omit) }}"
+          ports: "{{ ports | default(omit) }}"
+          volumes: "{{ volumes | default(omit) }}"
+          labels: "{{ labels | default(omit) }}"
+          restart_policy: unless-stopped
+...
